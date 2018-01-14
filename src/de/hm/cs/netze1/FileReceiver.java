@@ -8,15 +8,22 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/*
+  Krivoj
+ */
 public class FileReceiver {
 
   private static final int PACKET_SIZE = 64000;
   
   private File file;
   private Set<Package> receivedPackages = new HashSet<>();
+  private int SYNseq;
+  private int FINseq;
+  private int bytesReceived;
   
   private DatagramSocket socket;
   // Destination
@@ -62,10 +69,11 @@ public class FileReceiver {
       isSyn = p.isSYN();
       if (isSyn) {
         System.out.println("Received SYN");
-        this.receivedPackages.add(p);
         this.destAddress = in.getAddress();
         this.destPort = in.getPort();
         this.socket.send(acknowledgePacket(p));
+        this.SYNseq = p.getSequenceNumber();
+        this.bytesReceived = this.SYNseq + 1;
       }
     }
   }
@@ -82,30 +90,31 @@ public class FileReceiver {
   // Z2
   private void waitForFin() throws IOException {
     boolean isFin = false;
+    Package p = null;
     while (!isFin) {
       try {
-        Package p = extractPackage(recvPacket());
+        p = extractPackage(recvPacket());
         isFin = p.isFIN();
-        this.receivedPackages.add(p);
+        if (this.receivedPackages.add(p))
+          this.bytesReceived += p.getPayload().length;
         this.socket.send(acknowledgePacket(p));
       } catch (ChecksumException e) {
         continue;
       }
     }
+
+    this.FINseq = p.getSequenceNumber();
   }
   
   // Z3
   private void waitForRemainingPackages() throws IOException {
-    int synseq = this.receivedPackages.stream()
-        .mapToInt(Package::getSequenceNumber).min().getAsInt();
-    int finseq = this.receivedPackages.stream()
-        .mapToInt(Package::getSequenceNumber).max().getAsInt();
-    int finalSize = (finseq - synseq);
-    this.receivedPackages.removeIf(p -> p.getSequenceNumber() == synseq || p.getSequenceNumber() == finseq);
-    while (currentSize() < finalSize) {
+    System.out.println(receivedPackages.stream().mapToInt(x -> x.getPayload().length).sum());
+    while (this.bytesReceived != this.FINseq) {
+      System.out.println(bytesReceived + " | " + this.FINseq);
       try {
         Package p = extractPackage(recvPacket());
-        this.receivedPackages.add(p);
+        if (this.receivedPackages.add(p))
+          this.bytesReceived += p.getPayload().length;
         this.socket.send(acknowledgePacket(p));
       } catch (ChecksumException e) {
         continue;
@@ -115,14 +124,15 @@ public class FileReceiver {
   
   private void writeFile() {
     try (FileOutputStream fos = new FileOutputStream(file)) {
-      List<byte[]> payloads = receivedPackages.stream()
-          .sorted((p1, p2) -> p1.getSequenceNumber() - p2.getSequenceNumber())
-          .map(Package::getPayload)
-          .collect(Collectors.toList());
-      for (byte[] payload : payloads) {
-        fos.write(payload);
+      Map<Integer, byte[]> payloads = receivedPackages.stream()
+          .collect(Collectors.toMap(x -> x.getSequenceNumber(), x -> x.getPayload()));
+      int bytesWritten = this.SYNseq + 1;
+      while (bytesWritten != this.bytesReceived - 1) {
+        System.out.println(bytesWritten);
+        fos.write(payloads.get(bytesWritten));
+        bytesWritten += payloads.get(bytesWritten).length;
       }
-    } catch (IOException e) {
+    } catch (Exception e) {
       e.printStackTrace();
     }
   }
